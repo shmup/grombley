@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"embed"
+	"flag"
 	"fmt"
 	"html/template"
 	"io"
@@ -9,8 +11,11 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"time"
+
+	"github.com/gorilla/mux"
 )
 
 //go:embed templates
@@ -21,30 +26,68 @@ const (
 	maxUploadSize = 5 * 1024 * 1024 // 5 MB, adjust as needed
 )
 
-func init() {
-	rand.Seed(time.Now().UnixNano())
-}
-
 func main() {
-	// Create the upload directory if it doesn't exist
+	var wait time.Duration
+	flag.DurationVar(&wait, "graceful-timeout", time.Second*15, "the duration for which the server gracefully wait for existing connections to finish - e.g. 15s or 1m")
+	flag.Parse()
+
+	r := mux.NewRouter()
+
+	r.PathPrefix("/uploads/").Handler(http.StripPrefix("/uploads/", http.FileServer(http.Dir("./uploads"))))
+	r.HandleFunc("/upload", uploadHandler)
+	r.HandleFunc("/", indexHandler)
+	r.HandleFunc("/fronc", froncHandler)
+
+	port := ":8080"
+
 	if _, err := os.Stat(uploadPath); os.IsNotExist(err) {
 		os.MkdirAll(uploadPath, os.ModePerm)
 	}
 
-	// Create a new HTTP router
-	http.HandleFunc("/upload", uploadHandler)
-	http.HandleFunc("/fronc", froncHandler)
-	http.HandleFunc("/", indexHandler)
+	srv := &http.Server{
+		Addr: "0.0.0.0" + port,
+		// good practice to set timeouts to avoid Slowloris attacks.
+		WriteTimeout: time.Second * 15,
+		ReadTimeout:  time.Second * 15,
+		IdleTimeout:  time.Second * 60,
+		Handler:      r,
+	}
 
-	// Define the port you want the server to listen on
-	port := ":8080" // Change this to your desired port
+	// goroutine so that it doesn't block
+	go func() {
+		fmt.Printf("Server is running on port %s\n", port)
+		if err := srv.ListenAndServe(); err != nil {
+			log.Println(err)
+		}
+	}()
 
-	fmt.Printf("Server is running on port %s\n", port)
-	log.Fatal(http.ListenAndServe(port, nil))
+	interruptSignal := make(chan os.Signal, 1)
+
+	signal.Notify(interruptSignal, os.Interrupt) // ctrl+c friendly
+
+	<-interruptSignal // block until we receive our signal
+
+	// create a deadline to wait for
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	srv.Shutdown(ctx) // wait until timeout deadline. doesn't block
+	log.Println("shutting down")
+	os.Exit(0)
 }
 
 func froncHandler(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, "we fronc!\n")
+}
+
+func randfilename(n int, f string) string {
+	letterRunes := []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+	split := strings.Split(f, ".")
+	extension := split[len(split)-1] // get the last element as the extension
+	return string(b) + "." + extension
 }
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
@@ -90,15 +133,4 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	// fmt.Fprintln(w, "File uploaded successfully:", handler.Filename)
 	// http.Redirect(w, r, "http://localhost:8080/" + genfilename, http.StatusSeeOther)
 	http.Redirect(w, r, "/fronc", http.StatusSeeOther)
-}
-
-func randfilename(n int, f string) string {
-	letterRunes := []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-	b := make([]rune, n)
-	for i := range b {
-		b[i] = letterRunes[rand.Intn(len(letterRunes))]
-	}
-	split := strings.Split(f, ".")
-	extension := split[len(split)-1] // get the last element as the extension
-	return string(b) + "." + extension
 }
