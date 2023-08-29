@@ -98,6 +98,7 @@ func randfilename(n int, f string) string {
 	for i := range b {
 		b[i] = letterRunes[rand.Intn(len(letterRunes))]
 	}
-	extension := strings.Split(f, ".")[1]
+	split := strings.Split(f, ".")
+	extension := split[len(split)-1] // get the last element as the extension
 	return string(b) + "." + extension
 }
