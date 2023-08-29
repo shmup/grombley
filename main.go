@@ -33,7 +33,6 @@ func main() {
 
 	// Create a new HTTP router
 	http.HandleFunc("/upload", uploadHandler)
-	http.HandleFunc("/foo", redirectHandler)
 	http.HandleFunc("/fronc", froncHandler)
 	http.HandleFunc("/", indexHandler)
 
@@ -46,10 +45,6 @@ func main() {
 
 func froncHandler(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, "we fronc!\n")
-}
-
-func redirectHandler(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "https://piss.es/", http.StatusSeeOther)
 }
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
