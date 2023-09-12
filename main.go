@@ -22,6 +22,8 @@ type Config struct {
 	Port       string `toml:"port"`
 	ServePath  string `toml:"serve_path"`
 	UploadPath string `toml:"upload_path"`
+	Username   string `toml:"username"`
+	Password   string `toml:"password"`
 }
 
 var config Config
@@ -39,17 +41,33 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 }
 
+func BasicAuth(username, password string) func(handler http.HandlerFunc) http.HandlerFunc {
+	return func(handler http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			user, pass, ok := r.BasicAuth()
+			if !ok || user != username || pass != password {
+				w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			handler(w, r)
+		}
+	}
+}
+
 func main() {
 	// Create the upload directory if it doesn't exist
 	if _, err := os.Stat(config.UploadPath); os.IsNotExist(err) {
 		os.MkdirAll(config.UploadPath, os.ModePerm)
 	}
 
+	auth := BasicAuth(config.Username, config.Password)
+
 	// Create a new HTTP router
-	http.HandleFunc("/upload", uploadHandler)
-	http.HandleFunc("/url", urlUploadHandler)
+	http.HandleFunc("/upload", auth(uploadHandler))
+	http.HandleFunc("/url", auth(urlUploadHandler))
 	http.HandleFunc("/i/", serveImageHandler)
-	http.HandleFunc("/", indexHandler)
+	http.HandleFunc("/", auth(indexHandler))
 
 	// Define the port you want the server to listen on
 	port := config.Port // Change this to your desired port
