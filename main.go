@@ -19,6 +19,8 @@ import (
 	"strings"
 	"text/template"
 	"time"
+
+	jpegstructure "github.com/dsoprea/go-jpeg-image-structure/v2"
 )
 
 type Gallery struct {
@@ -247,31 +249,29 @@ func serveThumbnailImageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	imagePath := filepath.Join(config.UploadPath, imageName)
-	imageFile, err := os.Open(imagePath)
-	if err != nil {
-		notfoundHandler(w)
-		return
-	}
-	defer imageFile.Close()
 
-	dst, format, err := shrinkImage(imageFile, 4)
+	// Generate thumbnail with preserved EXIF metadata
+	thumbnailData, err := shrinkImageWithExif(imagePath, 4)
 	if err != nil {
-		http.Error(w, "Failed to shrink image", http.StatusInternalServerError)
+		http.Error(w, "Failed to generate thumbnail", http.StatusInternalServerError)
 		return
 	}
 
-	if format == "png" {
+	// Detect content type from file extension
+	ext := strings.ToLower(filepath.Ext(imageName))
+	switch ext {
+	case ".png":
 		w.Header().Set("Content-Type", "image/png")
-		err = png.Encode(w, dst)
-	} else {
+	case ".gif":
+		w.Header().Set("Content-Type", "image/gif")
+	default:
 		w.Header().Set("Content-Type", "image/jpeg")
-		err = jpeg.Encode(w, dst, &jpeg.Options{Quality: 85})
 	}
-	if err != nil {
-		http.Error(w, "Failed to encode image", http.StatusInternalServerError)
-		return
-	}
+
+	// Write thumbnail data
+	w.Write(thumbnailData)
 }
+
 
 // shrinkImage reduces the size of an image by the given factor and returns the new image and format.
 func shrinkImage(reader io.Reader, factor int) (image.Image, string, error) {
@@ -291,6 +291,88 @@ func shrinkImage(reader io.Reader, factor int) (image.Image, string, error) {
 		}
 	}
 	return dst, format, nil
+}
+
+// shrinkImageWithExif creates a thumbnail with preserved EXIF metadata for JPEG images
+func shrinkImageWithExif(filePath string, factor int) ([]byte, error) {
+	// Read the original image file
+	originalData, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse JPEG structure to extract EXIF
+	jmp := jpegstructure.NewJpegMediaParser()
+	intfc, err := jmp.ParseBytes(originalData)
+	if err != nil {
+		// If not a JPEG or can't parse, fall back to regular shrinking
+		file, err := os.Open(filePath)
+		if err != nil {
+			return nil, err
+		}
+		defer file.Close()
+		
+		img, format, err := shrinkImage(file, factor)
+		if err != nil {
+			return nil, err
+		}
+		
+		var buf bytes.Buffer
+		if format == "png" {
+			err = png.Encode(&buf, img)
+		} else {
+			err = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85})
+		}
+		return buf.Bytes(), err
+	}
+
+	sl := intfc.(*jpegstructure.SegmentList)
+	
+	// Create thumbnail
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	thumbnailImg, _, err := shrinkImage(file, factor)
+	if err != nil {
+		return nil, err
+	}
+
+	// Encode thumbnail to buffer
+	var thumbnailBuf bytes.Buffer
+	err = jpeg.Encode(&thumbnailBuf, thumbnailImg, &jpeg.Options{Quality: 85})
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the new thumbnail to get its structure
+	thumbnailIntfc, err := jmp.ParseBytes(thumbnailBuf.Bytes())
+	if err != nil {
+		return thumbnailBuf.Bytes(), nil // return without EXIF if can't parse
+	}
+
+	thumbnailSl := thumbnailIntfc.(*jpegstructure.SegmentList)
+
+	// Try to preserve EXIF by copying from original
+	ib, err := sl.ConstructExifBuilder()
+	if err == nil {
+		// Set the EXIF data on the thumbnail
+		err = thumbnailSl.SetExif(ib)
+		if err != nil {
+			log.Printf("Failed to set EXIF on thumbnail: %v", err)
+		}
+	}
+
+	// Write the final image with EXIF
+	var finalBuf bytes.Buffer
+	err = thumbnailSl.Write(&finalBuf)
+	if err != nil {
+		return thumbnailBuf.Bytes(), nil // return without EXIF if can't write
+	}
+
+	return finalBuf.Bytes(), nil
 }
 
 // processUploadedFile handles a single file upload and returns the filename
@@ -383,10 +465,17 @@ func galleryHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// build full urls for images
-	var imageURLs []string
+	// build both thumbnail and full urls for images
+	type ImagePair struct {
+		Thumbnail string
+		Full      string
+	}
+	var imagePairs []ImagePair
 	for _, img := range gallery.Images {
-		imageURLs = append(imageURLs, fmt.Sprintf("%s%s", config.ServePath, img))
+		imagePairs = append(imagePairs, ImagePair{
+			Thumbnail: fmt.Sprintf("/t/%s", img),
+			Full:      fmt.Sprintf("%s%s", config.ServePath, img),
+		})
 	}
 
 	// serve gallery template
@@ -395,7 +484,7 @@ func galleryHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error loading template", http.StatusInternalServerError)
 		return
 	}
-	tmpl.Execute(w, imageURLs)
+	tmpl.Execute(w, imagePairs)
 }
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	err := r.ParseMultipartForm(10 << 20) // 10 MB max in-memory size
